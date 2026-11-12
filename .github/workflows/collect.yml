@@ -1,0 +1,59 @@
+name: 베스트셀러 수집
+
+on:
+  schedule:
+    # 깃허브 예약 실행은 늦어질 수 있어 두 번 잡아 둠 (시간은 UTC 기준)
+    - cron: '50 21 * * *'   # 한국 시각 06:50
+    - cron: '35 22 * * *'   # 한국 시각 07:35 — 첫 실행이 성공했으면 아무것도 안 하고 끝남
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '오늘 것을 처음부터 다시 수집 (true/false)'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: collect
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 패키지 설치
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: 수집
+        run: |
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            python scraper.py --force
+          else
+            python scraper.py
+          fi
+
+      - name: 결과 저장(커밋)
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data
+          if git diff --cached --quiet; then
+            echo "바뀐 것 없음"; exit 0
+          fi
+          git commit -m "순위 수집: $(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M') KST"
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push origin HEAD:main && exit 0
+            sleep 5
+          done
+          echo "::error::저장(push) 실패"; exit 1

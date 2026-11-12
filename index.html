@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>서점 3사 베스트셀러</title>
+<style>
+  :root{--ink:#1d1d1f;--sub:#6e6e73;--line:#e5e5ea;--bg:#fafafa;--up:#d0021b;--down:#2a62c9;--hot:#fff4d6;--teen:#e6f1ff;--teenink:#0b5cad}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",sans-serif;color:var(--ink);background:var(--bg)}
+  header{background:#fff;border-bottom:1px solid var(--line);padding:18px 20px 12px;position:sticky;top:0;z-index:5}
+  h1{font-size:20px;margin:0 0 4px}
+  .meta{color:var(--sub);font-size:13px}
+  .controls{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;align-items:center}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:999px;overflow:hidden;background:#fff}
+  .seg button{border:0;background:none;padding:7px 16px;font-size:14px;cursor:pointer;color:var(--sub)}
+  .seg button.on{background:var(--ink);color:#fff}
+  label.chk{font-size:14px;color:var(--sub);display:flex;gap:6px;align-items:center;cursor:pointer}
+  select{font-size:14px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff}
+  main{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;padding:16px 20px 40px;max-width:1400px;margin:0 auto}
+  @media (max-width:980px){main{grid-template-columns:1fr}}
+  .col{background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .col h2{font-size:16px;margin:0;padding:12px 14px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:baseline}
+  .col h2 small{font-weight:normal;color:var(--sub);font-size:12px}
+  .note{font-size:12px;color:var(--sub);padding:8px 14px;background:#f5f5f7;border-bottom:1px solid var(--line)}
+  .fail{color:var(--up);font-weight:600}
+  ol{list-style:none;margin:0;padding:0}
+  li{display:grid;grid-template-columns:34px 52px 1fr;gap:6px;padding:8px 14px;border-bottom:1px solid #f0f0f2;font-size:14px;align-items:start}
+  li.hot{background:var(--hot)}
+  .rk{font-weight:700;text-align:right}
+  .chg{font-size:12px;text-align:center;color:var(--sub);padding-top:2px}
+  .chg.up{color:var(--up);font-weight:600}.chg.down{color:var(--down)}.chg.new{color:var(--up);font-weight:700}
+  .t a{color:var(--ink);text-decoration:none;font-weight:500}
+  .t a:hover{text-decoration:underline}
+  .by{display:block;color:var(--sub);font-size:12px;margin-top:2px}
+  .tag{display:inline-block;font-size:11px;padding:1px 6px;border-radius:4px;margin-right:4px;vertical-align:1px;font-weight:600}
+  .tag.hot{background:#ffd666;color:#5c3c00}.tag.teen{background:var(--teen);color:var(--teenink)}
+  .empty{padding:20px 14px;color:var(--sub);font-size:14px}
+  footer{color:var(--sub);font-size:12px;text-align:center;padding:0 20px 30px}
+</style>
+</head>
+<body>
+<header>
+  <h1>서점 3사 베스트셀러</h1>
+  <div class="meta" id="meta">불러오는 중…</div>
+  <div class="controls">
+    <div class="seg" id="kindSeg">
+      <button data-kind="weekly" class="on">주간 종합</button>
+      <button data-kind="daily">일간</button>
+    </div>
+    <label class="chk"><input type="checkbox" id="onlyHot"> 주목할 책·청소년만</label>
+    <select id="dateSel" aria-label="날짜"></select>
+  </div>
+</header>
+<main id="main"></main>
+<footer>
+  <span class="tag hot">주목</span> 1~10위 5계단↑ · 11~30위 10계단↑ · 31~100위 20계단↑ (서점 표시 변동 기준, NEW는 100위 밖에서 진입으로 계산)
+  &nbsp;·&nbsp; <span class="tag teen">청소년</span> 서점 분류가 청소년인 책<br>
+  알라딘은 순위 변동을 표시하지 않아 직전 수집분과 비교해 계산합니다. 매일 아침 자동 수집.
+</footer>
+<script>
+const STORES = {kyobo:"교보문고", yes24:"예스24", aladin:"알라딘"};
+let kind = "weekly", snap = null;
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function chgClass(it){ return {up:"up",down:"down",new:"new"}[it.change_type] || ""; }
+
+function render(){
+  const main = document.getElementById("main");
+  const onlyHot = document.getElementById("onlyHot").checked;
+  if(!snap){ main.innerHTML = '<div class="empty">아직 수집된 데이터가 없습니다.</div>'; return; }
+  document.getElementById("meta").textContent = `${snap.date} 수집 (${snap.collected_at || ""} KST)`;
+  main.innerHTML = Object.entries(STORES).map(([s, name]) => {
+    const l = (snap.stores[s] || {})[kind];
+    if(!l || l.status !== "ok"){
+      return `<section class="col"><h2>${name}</h2><div class="empty fail">수집 실패${l && l.error ? " — " + esc(l.error) : ""}</div></section>`;
+    }
+    let items = l.items;
+    const hotN = items.filter(i => i.notable).length, teenN = items.filter(i => i.teen).length;
+    if(onlyHot) items = items.filter(i => i.notable || i.teen);
+    const rows = items.map(it => `
+      <li class="${it.notable ? "hot" : ""}">
+        <span class="rk">${it.rank}</span>
+        <span class="chg ${chgClass(it)}">${esc(it.change_label)}</span>
+        <span class="t">${it.notable ? '<span class="tag hot">주목</span>' : ""}${it.teen ? '<span class="tag teen">청소년</span>' : ""}<a href="${esc(it.link)}" target="_blank" rel="noopener">${esc(it.title)}</a>
+          <span class="by">${esc(it.author)} · ${esc(it.publisher)}</span></span>
+      </li>`).join("");
+    return `<section class="col">
+      <h2>${name} <small>주목 ${hotN} · 청소년 ${teenN}</small></h2>
+      ${l.note ? `<div class="note">${esc(l.note)}</div>` : ""}
+      <ol>${rows || '<div class="empty">해당 책 없음</div>'}</ol></section>`;
+  }).join("");
+}
+
+async function load(dateStr){
+  const url = dateStr ? `data/snapshots/${dateStr}.json` : "data/latest.json";
+  try{ snap = await (await fetch(url + "?v=" + Date.now())).json(); }catch(e){ snap = null; }
+  render();
+}
+
+async function init(){
+  try{
+    const dates = await (await fetch("data/snapshots/index.json?v=" + Date.now())).json();
+    const sel = document.getElementById("dateSel");
+    sel.innerHTML = dates.slice().reverse().map((d, i) => `<option value="${i ? d : ""}">${d}${i ? "" : " (최신)"}</option>`).join("");
+    sel.onchange = () => load(sel.value);
+  }catch(e){ document.getElementById("dateSel").style.display = "none"; }
+  document.querySelectorAll("#kindSeg button").forEach(b => b.onclick = () => {
+    kind = b.dataset.kind;
+    document.querySelectorAll("#kindSeg button").forEach(x => x.classList.toggle("on", x === b));
+    render();
+  });
+  document.getElementById("onlyHot").onchange = render;
+  load("");
+}
+init();
+</script>
+</body>
+</html>
