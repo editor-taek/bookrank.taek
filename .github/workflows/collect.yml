@@ -2,9 +2,10 @@ name: 베스트셀러 수집
 
 on:
   schedule:
-    # 깃허브 예약 실행은 늦어질 수 있어 두 번 잡아 둠 (시간은 UTC 기준)
-    - cron: '50 21 * * *'   # 한국 시각 06:50
-    - cron: '35 22 * * *'   # 한국 시각 07:35 — 첫 실행이 성공했으면 아무것도 안 하고 끝남
+    # 서점 순위는 오전 9시쯤 바뀌므로 9시 정각에 수집한다.
+    # 깃허브 예약 실행은 보통 30~40분 늦게 시작해서 미리 깨워 두고 9시까지 기다린다. (시간은 UTC 기준)
+    - cron: '20 23 * * *'   # 한국 시각 08:20에 깨움 → 09:00까지 대기 후 수집
+    - cron: '10 0 * * *'    # 한국 시각 09:10 예비 — 이미 수집했으면 아무것도 안 하고 끝남
   workflow_dispatch:
     inputs:
       force:
@@ -22,7 +23,7 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +35,17 @@ jobs:
         run: |
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
+
+      - name: 오전 9시까지 기다리기
+        if: github.event_name == 'schedule'
+        run: |
+          now=$(date +%s)
+          target=$(TZ=Asia/Seoul date -d "$(TZ=Asia/Seoul date +%Y-%m-%d) 09:00:00" +%s)
+          if [ "$now" -lt "$target" ]; then
+            echo "한국 시각 $(TZ=Asia/Seoul date +%H:%M) — 09:00까지 $(( (target-now)/60 ))분 기다립니다"
+            sleep $(( target - now ))
+          fi
+          echo "수집 시작: $(TZ=Asia/Seoul date '+%H:%M:%S') KST"
 
       - name: 수집
         run: |

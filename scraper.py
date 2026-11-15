@@ -1,4 +1,4 @@
-"""서점 3사(교보문고·예스24·알라딘) 주간 종합 / 일간 베스트셀러 1~100위 수집기.
+"""서점 3사(교보문고·예스24·알라딘) 주간 / 일간 베스트셀러 1~100위 수집기.
 
 깃허브 액션에서 하루 1번 실행된다. 결과:
   data/latest.json             오늘 수집 결과 (웹페이지·보고서가 읽음)
@@ -37,7 +37,7 @@ DETAIL_PAUSE = 1.5   # 상세페이지 사이 쉬는 시간(초)
 MAX_DETAIL_PER_RUN = int(os.environ.get("MAX_DETAIL", "300"))  # 한 번에 확인할 상세페이지 최대 수 (서점 부담 제한)
 
 STORES = {"kyobo": "교보문고", "yes24": "예스24", "aladin": "알라딘"}
-LISTS = {"weekly": "주간 종합", "daily": "일간"}
+LISTS = {"weekly": "주간", "daily": "일간"}
 
 SOURCE_URLS = {
     "kyobo": {"weekly": "https://store.kyobobook.co.kr/bestseller/total/weekly",
@@ -384,6 +384,10 @@ def main():
     snap_path = SNAP_DIR / f"{today}.json"
 
     snapshot = None if args.force else load_json(snap_path, None)
+    # 서점 순위는 오전 9시쯤 바뀐다 — 9시 전에 모은 것은 9시 이후 실행 때 다시 모은다
+    if snapshot and now.hour >= 9 and (snapshot.get("collected_at") or "")[11:16] < "09:00":
+        log("9시 전에 모은 순위라서 다시 수집합니다.")
+        snapshot = None
     if not snapshot:
         snapshot = {"date": today, "stores": {s: {} for s in STORES}}
     todo = [(s, k) for s in STORES for k in LISTS
@@ -426,7 +430,7 @@ def main():
                                      "알라딘은 순위 변동을 표시하지 않음 — 비교할 이전 수집분이 없어 변동 미산출")
                 if store == "kyobo" and kind == "weekly" and prev_list and prev_list.get("period") == entry["period"]:
                     entry["updated"] = False
-                    entry["note"] = "교보 주간 종합은 주 1회 갱신 — 오늘은 갱신되지 않아 '변동 없음'으로 처리"
+                    entry["note"] = "교보 주간은 주 1회 갱신 — 오늘은 갱신되지 않아 '변동 없음'으로 처리"
                 log(f"  {STORES[store]} {LISTS[kind]}: {len(entry['items'])}권")
             snapshot["stores"].setdefault(store, {})[kind] = entry
             time.sleep(LIST_PAUSE)

@@ -1,17 +1,16 @@
 """매일 아침 보고서용 데이터 정리 (Claude 예약 작업이 실행).
 
 수집된 순위 파일을 읽어서
-  - 서점별 주목할 책 표 (주간 종합 / 일간)
+  - 서점별 주목할 책 표 (주간 / 일간)
   - 원인 조사 대상 (주간 최대 3권 + 일간 최대 3권)
   - [청소년] 목록
   - 수집 실패 여부
-를 JSON으로 출력하고, --html 을 주면 메일 본문 뼈대(표가 채워진 HTML)도 만든다.
-원인 분석·요약 문장은 Claude가 웹 검색 후 뼈대의 자리표시({{...}})에 채운다.
+를 JSON으로 만든다. 메일 HTML은 render_email.py가 이 JSON과
+Claude가 쓴 원인 분석(analysis.json)을 합쳐서 만든다.
 
-실행: python report_data.py [--date YYYY-MM-DD] [--html report.html]
+실행: python report_data.py [--date YYYY-MM-DD] --out /tmp/report.json
 """
 import argparse
-import html
 import json
 import re
 import sys
@@ -25,9 +24,10 @@ DATA = Path(__file__).parent / "data"
 SNAP_DIR = DATA / "snapshots"
 PAGE_URL = "https://editor-taek.github.io/bookrank.taek/"
 STORES = {"kyobo": "교보문고", "yes24": "예스24", "aladin": "알라딘"}
-LISTS = {"weekly": "주간 종합", "daily": "일간"}
+LISTS = {"weekly": "주간", "daily": "일간"}
 WEEKDAYS = "월화수목금토일"
 PICKS_PER_LIST = 3
+BOARD_LIMIT = 15   # 메일 표에 보여 줄 최대 권수 (나머지는 웹페이지)
 RECENT_DAYS = 3
 
 
@@ -111,24 +111,24 @@ def collect_hits(d, kind):
     return out
 
 
-def select_picks(d, kind, recent):
-    """원인 조사 대상 고르기. recent: {book_key: multiplier} 최근 3일 보고분."""
-    hits = collect_hits(d, kind)
+def group_hits(hits, include_teen=False):
+    """서점별 주목 기록을 '같은 책' 단위로 묶고 우선순위대로 정렬."""
     groups, by_title = {}, {}
     for store, res in hits.items():
         for it in res.values():
-            if it.get("teen"):
+            if it.get("teen") and not include_teen:
                 continue  # 청소년 책은 원인 보고서 없음
             k = book_key(it)
             nt = norm_title(it["title"])
             if k not in groups and not it.get("isbn") and nt in by_title:
                 k = by_title[nt]  # ISBN을 모르는 책은 제목으로 같은 책 찾기
             g = groups.setdefault(k, {"key": k, "title": it["title"], "author": it["author"],
-                                      "publisher": it["publisher"], "isbn": it.get("isbn"), "hits": []})
+                                      "publisher": it["publisher"], "isbn": it.get("isbn"),
+                                      "link": it["link"], "teen": bool(it.get("teen")), "hits": []})
             by_title.setdefault(nt, k)
             g["hits"].append({"store": store, "store_name": STORES[store], "rank": it.get("now_rank") or it["rank"],
                               "change_label": it["change_label"], "multiplier": it.get("multiplier"),
-                              "date": it.get("hit_date"), "link": it["link"]})
+                              "fri_rank": it.get("fri_rank"), "date": it.get("hit_date"), "link": it["link"]})
     ranked = []
     for g in groups.values():
         g["stores_count"] = len({h["store"] for h in g["hits"]})
@@ -136,6 +136,12 @@ def select_picks(d, kind, recent):
         g["best_rank"] = min(h["rank"] for h in g["hits"])
         ranked.append(g)
     ranked.sort(key=lambda g: (-g["stores_count"], -g["max_multiplier"], g["best_rank"]))
+    return ranked
+
+
+def select_picks(d, kind, recent):
+    """원인 조사 대상 고르기. recent: {book_key: multiplier} 최근 3일 보고분."""
+    ranked = group_hits(collect_hits(d, kind))
     picks, skipped = [], []
     for g in ranked:
         if len(picks) >= PICKS_PER_LIST:
@@ -157,24 +163,47 @@ def picks_for(d):
     if d.weekday() >= 5 or load_snap(d) is None or d < datetime.now(KST).date() - timedelta(days=20):
         _memo[d] = {"weekly": [], "daily": []}
         return _memo[d]
+    recent = recent_reports(d)
+    res = {kind: select_picks(d, kind, recent)[0] for kind in LISTS}
+    _memo[d] = res
+    return res
+
+
+def recent_reports(d):
     recent = {}
     for back in range(1, RECENT_DAYS + 1):
         prev = picks_for(d - timedelta(days=back))
         for kind in LISTS:
             for g in prev[kind]:
                 recent[g["key"]] = max(recent.get(g["key"], 0), g["max_multiplier"])
-    res = {}
-    for kind in LISTS:
-        res[kind] = select_picks(d, kind, recent)[0]
-    _memo[d] = res
-    return res
+    return recent
+
+
+def current_index(snap, kind):
+    """같은 책의 다른 서점 현재 순위를 찾기 위한 색인."""
+    idx = {}
+    for store in STORES:
+        l = lst(snap, store, kind)
+        by = {}
+        if l and l.get("status") == "ok":
+            for it in l["items"]:
+                by.setdefault(book_key(it), it)
+                by.setdefault("t:" + norm_title(it["title"]), it)
+        idx[store] = by
+    return idx
+
+
+def cell(it, notable, fri_rank=None, change_label=None):
+    return {"rank": it["rank"], "change_label": change_label or it.get("change_label", ""),
+            "change_type": it.get("change_type"), "notable": notable, "fri_rank": fri_rank}
 
 
 def build(d):
     snap = load_snap(d)
     out = {"date": d.isoformat(), "weekday": WEEKDAYS[d.weekday()], "is_weekend": d.weekday() >= 5,
            "monday_mode": d.weekday() == 0, "window": [x.isoformat() for x in window_dates(d)],
-           "page_url": PAGE_URL, "snapshot_found": snap is not None, "collection": {}, "sections": {}, "teen": []}
+           "page_url": PAGE_URL, "snapshot_found": snap is not None,
+           "collected_at": (snap or {}).get("collected_at"), "collection": {}, "sections": {}, "teen": []}
     for store, sname in STORES.items():
         for kind, kname in LISTS.items():
             l = lst(snap, store, kind) or {}
@@ -185,132 +214,72 @@ def build(d):
     if out["is_weekend"] or not snap:
         return out
 
-    # 최근 3일 보고 이력
-    recent = {}
-    for back in range(1, RECENT_DAYS + 1):
-        prev = picks_for(d - timedelta(days=back))
-        for kind in LISTS:
-            for g in prev[kind]:
-                recent[g["key"]] = max(recent.get(g["key"], 0), g["max_multiplier"])
-
+    recent = recent_reports(d)
     picked_keys = {}
     for kind in LISTS:
-        hits = collect_hits(d, kind)
-        tables = {}
-        for store in STORES:
-            rows = list(hits[store].values())
-            # 청소년 책은 상승 여부와 관계없이 표에 [청소년]으로 올림
-            l = lst(snap, store, kind)
-            if l and l.get("status") == "ok":
-                ids = {r["id"] for r in rows}
-                rows += [it for it in l["items"] if it.get("teen") and it["id"] not in ids]
-            rows.sort(key=lambda r: (r.get("now_rank") or r["rank"]))
-            tables[store] = [{"rank": r.get("now_rank") or r["rank"], "change_label": r["change_label"],
-                              "fri_rank": r.get("fri_rank"), "hit_date": r.get("hit_date"),
-                              "title": r["title"], "author": r["author"], "publisher": r["publisher"],
-                              "teen": bool(r.get("teen")), "notable": bool(r.get("notable") or r.get("hit_date")),
-                              "link": r["link"]} for r in rows]
+        ranked = group_hits(collect_hits(d, kind))
+        idx = current_index(snap, kind)
+        board = []
+        for g in ranked:
+            cells = {}
+            for h in g["hits"]:
+                c = cell(h, True, h.get("fri_rank"), h["change_label"])
+                c["rank"] = h["rank"]
+                cells[h["store"]] = c
+            for store in STORES:
+                if store in cells:
+                    continue
+                it = idx[store].get(g["key"]) or idx[store].get("t:" + norm_title(g["title"]))
+                cells[store] = cell(it, False) if it else None
+            board.append({"key": g["key"], "title": g["title"], "author": g["author"],
+                          "publisher": g["publisher"], "link": g["link"], "cells": cells,
+                          "stores_count": g["stores_count"]})
         picks, skipped, n = select_picks(d, kind, recent)
         for g in picks:
             g["also_in"] = [k for k, keys in picked_keys.items() if g["key"] in keys]
         picked_keys[kind] = {g["key"] for g in picks}
-        out["sections"][kind] = {"list_name": LISTS[kind], "tables": tables, "picks": picks,
-                                 "skipped_recent": skipped, "candidate_count": n}
+        out["sections"][kind] = {"list_name": LISTS[kind], "board": board[:BOARD_LIMIT],
+                                 "board_total": len(board), "picks": picks,
+                                 "skipped_recent": skipped, "candidate_count": n,
+                                 "notable_counts": {s: sum(1 for b in board if b["cells"].get(s) and b["cells"][s]["notable"])
+                                                    for s in STORES}}
 
+    # 청소년: 책 단위로 묶어 서점·주간/일간 순위를 한 줄에
+    teen = {}
     for store, sname in STORES.items():
         for kind, kname in LISTS.items():
             l = lst(snap, store, kind)
             if l and l.get("status") == "ok":
                 for it in l["items"]:
                     if it.get("teen"):
-                        out["teen"].append({"store": sname, "list": kname, "rank": it["rank"],
-                                            "change_label": it["change_label"], "title": it["title"],
-                                            "author": it["author"], "publisher": it["publisher"], "link": it["link"]})
+                        k = book_key(it)
+                        t = teen.setdefault(k, {"title": it["title"], "author": it["author"],
+                                                "publisher": it["publisher"], "link": it["link"], "cells": {}})
+                        t["cells"].setdefault(store, {})[kind] = {"rank": it["rank"], "change_label": it["change_label"],
+                                                                  "change_type": it.get("change_type")}
+    out["teen"] = sorted(teen.values(), key=lambda t: min(c["rank"] for s in t["cells"].values() for c in s.values()))
     return out
-
-
-# ------------------------------------------------------------------ 메일 뼈대 HTML
-CSS = ("body{font-family:'Apple SD Gothic Neo','Malgun Gothic',sans-serif;color:#222;line-height:1.55;max-width:760px}"
-       "h2{font-size:18px;border-bottom:2px solid #222;padding-bottom:4px;margin-top:28px}"
-       "h3{font-size:15px;margin:18px 0 6px}"
-       "table{border-collapse:collapse;width:100%;font-size:13px;margin-bottom:10px}"
-       "th,td{border:1px solid #ddd;padding:4px 6px;text-align:left;vertical-align:top}"
-       "th{background:#f4f4f4}.teen{background:#e8f3ff;color:#0b5cad;font-weight:bold;padding:0 4px;border-radius:3px}"
-       ".up{color:#d0021b;font-weight:bold}.note{color:#888;font-size:12px}.fail{color:#d0021b;font-weight:bold}")
-
-
-def e(s):
-    return html.escape(str(s or ""))
-
-
-def table_html(rows, monday):
-    if not rows:
-        return '<p class="note">해당 없음</p>'
-    head = "<tr><th>순위</th><th>변동</th>" + ("<th>금요일</th>" if monday else "") + "<th>제목</th><th>저자 · 출판사</th></tr>"
-    body = ""
-    for r in rows:
-        tag = '<span class="teen">[청소년]</span> ' if r["teen"] else ""
-        cls = ' class="up"' if r["change_label"].startswith(("▲", "NEW")) else ""
-        fri = f"<td>{e(r['fri_rank'] or '100위 밖')}</td>" if monday else ""
-        body += (f"<tr><td>{r['rank']}</td><td{cls}>{e(r['change_label'])}</td>{fri}"
-                 f"<td>{tag}<a href=\"{e(r['link'])}\">{e(r['title'])}</a></td>"
-                 f"<td>{e(r['author'])} · {e(r['publisher'])}</td></tr>")
-    return f"<table>{head}{body}</table>"
-
-
-def render_html(r):
-    title = f"[베스트셀러] {r['date']} ({r['weekday']})"
-    parts = [f"<html><head><meta charset='utf-8'><style>{CSS}</style></head><body>", f"<h1 style='font-size:20px'>{e(title)}</h1>"]
-    fails = [c for c in r["collection"].values() if c["status"] != "ok"]
-    if not r["snapshot_found"]:
-        parts.append('<p class="fail">⚠ 오늘 순위 수집 실패 — 수집 파일이 없습니다. 깃허브 액션 실행 기록을 확인해 주세요.</p>')
-    elif fails:
-        parts.append('<p class="fail">⚠ 수집 실패: ' + ", ".join(f"{c['store']} {c['list']}" for c in fails) + "</p>")
-    if r["monday_mode"]:
-        parts.append('<p class="note">월요일 보고서: 금요일 → 월요일 주말 변동을 종합했습니다 (토·일·월 수집분).</p>')
-    parts.append("<h2>오늘의 한눈 요약</h2>{{SUMMARY}}")
-    for kind, sec in r["sections"].items():
-        parts.append(f"<h2>[{sec['list_name']}] 주목할 책</h2>")
-        for store, sname in STORES.items():
-            c = r["collection"][f"{store}.{kind}"]
-            note = f' <span class="note">({e(c["note"])})</span>' if c.get("note") else ""
-            if c["status"] != "ok":
-                parts.append(f"<h3>{sname}</h3><p class='fail'>수집 실패</p>")
-                continue
-            parts.append(f"<h3>{sname}{note}</h3>" + table_html(sec["tables"][store], r["monday_mode"]))
-        parts.append(f"<h3>원인 분석 (최대 {PICKS_PER_LIST}권)</h3>{{{{{kind.upper()}_ANALYSIS}}}}")
-    parts.append("<h2>[청소년] 종합 100위 안 청소년 책</h2>")
-    if r["teen"]:
-        parts.append("<table><tr><th>서점</th><th>구분</th><th>순위</th><th>변동</th><th>제목</th><th>저자 · 출판사</th></tr>" + "".join(
-            f"<tr><td>{e(t['store'])}</td><td>{e(t['list'])}</td><td>{t['rank']}</td><td>{e(t['change_label'])}</td>"
-            f"<td><a href=\"{e(t['link'])}\">{e(t['title'])}</a></td><td>{e(t['author'])} · {e(t['publisher'])}</td></tr>"
-            for t in r["teen"]) + "</table>")
-    else:
-        parts.append('<p class="note">오늘은 종합 100위 안에 청소년 책이 없습니다.</p>')
-    parts.append(f"<h2>전체 순위</h2><p><a href=\"{PAGE_URL}\">{PAGE_URL}</a></p>")
-    parts.append('<p class="note">상승폭은 서점이 표시한 순위 변동 기준(알라딘은 표시가 없어 직전 수집분과 비교). '
-                 'NEW는 100위 밖에서 진입한 것으로 계산.</p></body></html>')
-    return title, "\n".join(parts)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date")
-    ap.add_argument("--html")
+    ap.add_argument("--out", default="/tmp/report.json")
     a = ap.parse_args()
     d = date.fromisoformat(a.date) if a.date else datetime.now(KST).date()
     r = build(d)
-    if a.html:
-        subject, body = render_html(r)
-        r["subject"] = subject
-        Path(a.html).write_text(body, encoding="utf-8")
-        r["html_path"] = a.html
-    # 출력이 너무 길지 않게 표는 요약만
-    slim = dict(r)
-    slim["sections"] = {k: {"list_name": v["list_name"], "picks": v["picks"], "skipped_recent": v["skipped_recent"],
-                            "candidate_count": v["candidate_count"],
-                            "table_counts": {s: len(t) for s, t in v["tables"].items()}}
-                        for k, v in r["sections"].items()}
+    r["subject"] = f"[베스트셀러] {r['date']} ({r['weekday']})"
+    Path(a.out).write_text(json.dumps(r, ensure_ascii=False, indent=1), encoding="utf-8")
+    # 화면에는 원인 조사에 필요한 것만
+    slim = {k: r[k] for k in ("date", "weekday", "is_weekend", "monday_mode", "snapshot_found",
+                               "collected_at", "subject")}
+    slim["out"] = a.out
+    slim["collection_failed"] = [f"{c['store']} {c['list']}" for c in r["collection"].values() if c["status"] != "ok"]
+    slim["picks"] = {k: [{"key": g["key"], "title": g["title"], "author": g["author"], "publisher": g["publisher"],
+                          "hits": [f"{h['store_name']} {h['rank']}위 {h['change_label']}" for h in g["hits"]],
+                          "also_in": g["also_in"]} for g in v["picks"]]
+                     for k, v in r["sections"].items()}
+    slim["teen_count"] = len(r["teen"])
     print(json.dumps(slim, ensure_ascii=False, indent=1))
     return 0
 
