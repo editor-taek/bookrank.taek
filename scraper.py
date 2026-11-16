@@ -406,7 +406,8 @@ def main():
         for store, kind in todo:
             entry = {"status": "failed", "source_url": SOURCE_URLS[store][kind],
                      "collected_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "items": []}
-            for attempt in (1, 2):
+            # 9시 직후 서점 목록이 갱신되는 몇 분 동안 빈 페이지가 나올 수 있어 1분 간격으로 최대 5번 시도
+            for attempt in range(1, 6):
                 try:
                     res = scrapers[store](page, kind)
                     if len(res["items"]) < 50:
@@ -416,8 +417,8 @@ def main():
                 except Exception as e:
                     entry["error"] = f"{type(e).__name__}: {e}"
                     log(f"  {STORES[store]} {LISTS[kind]} 실패({attempt}회): {e}")
-                    traceback.print_exc()
-                    time.sleep(5)
+                    if attempt < 5:
+                        time.sleep(60)
             if entry["status"] == "ok":
                 prev_date, prev_list = previous_snapshot(today, store, kind)
                 entry["compared_to"] = prev_date
