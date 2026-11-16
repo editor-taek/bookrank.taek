@@ -2,9 +2,9 @@ name: 베스트셀러 수집
 
 on:
   schedule:
-    # 서점 순위는 오전 9시쯤 바뀌므로 9시 정각에 수집한다.
+    # 서점 순위는 오전 9시쯤 바뀐다. 알라딘은 9시 직후 몇 분간 빈 목록을 내보내서 09:05에 수집한다.
     # 깃허브 예약 실행은 보통 30~40분 늦게 시작해서 미리 깨워 두고 9시까지 기다린다. (시간은 UTC 기준)
-    - cron: '20 23 * * *'   # 한국 시각 08:20에 깨움 → 09:00까지 대기 후 수집
+    - cron: '20 23 * * *'   # 한국 시각 08:20에 깨움 → 09:05까지 대기 후 수집
     - cron: '10 0 * * *'    # 한국 시각 09:10 예비 — 이미 수집했으면 아무것도 안 하고 끝남
   workflow_dispatch:
     inputs:
@@ -36,13 +36,13 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      - name: 오전 9시까지 기다리기
+      - name: 오전 9시 5분까지 기다리기
         if: github.event_name == 'schedule'
         run: |
           now=$(date +%s)
-          target=$(TZ=Asia/Seoul date -d "$(TZ=Asia/Seoul date +%Y-%m-%d) 09:00:00" +%s)
+          target=$(TZ=Asia/Seoul date -d "$(TZ=Asia/Seoul date +%Y-%m-%d) 09:05:00" +%s)
           if [ "$now" -lt "$target" ]; then
-            echo "한국 시각 $(TZ=Asia/Seoul date +%H:%M) — 09:00까지 $(( (target-now)/60 ))분 기다립니다"
+            echo "한국 시각 $(TZ=Asia/Seoul date +%H:%M) — 09:05까지 $(( (target-now)/60 ))분 기다립니다"
             sleep $(( target - now ))
           fi
           echo "수집 시작: $(TZ=Asia/Seoul date '+%H:%M:%S') KST"
