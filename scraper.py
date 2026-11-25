@@ -74,13 +74,39 @@ KYOBO_API = {
 
 
 def scrape_kyobo(page, kind):
-    page.goto(SOURCE_URLS["kyobo"][kind], wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(3000)
+    # 2026-11-18부터 교보 API가 'x-api-gw-key' 헤더 없는 요청을 403으로 막는다.
+    # 페이지가 스스로 API를 부를 때 쓰는 키를 가로채 같은 키로 요청한다.
+    keys = []
+
+    def grab_key(req):
+        k = req.headers.get("x-api-gw-key")
+        if k and "/api/gw/" in req.url:
+            keys.append(k)
+
+    page.on("request", grab_key)
+    try:
+        page.goto(SOURCE_URLS["kyobo"][kind], wait_until="domcontentloaded", timeout=60000)
+        for _ in range(30):  # 최대 15초 동안 키가 잡히기를 기다림
+            if keys:
+                break
+            page.wait_for_timeout(500)
+    finally:
+        page.remove_listener("request", grab_key)
+    if not keys:
+        raise RuntimeError("교보 API 키(x-api-gw-key)를 페이지에서 찾지 못했어요 (사이트 구조 변경 가능성)")
+    key = keys[-1]
+    js = """async ([u, k]) => {
+        const r = await fetch(u, {headers: {'x-api-gw-key': k, 'content-type': 'application/json'}});
+        return [r.status, await r.text()];
+    }"""
     rows, period = [], None
     for p in (1, 2):
         url = KYOBO_API[kind].format(p=p)
-        text = page.evaluate("async (u) => { const r = await fetch(u); return await r.text(); }", url)
-        data = json.loads(text)["data"]
+        status, text = page.evaluate(js, [url, key])
+        try:
+            data = json.loads(text)["data"]
+        except (ValueError, KeyError, TypeError):
+            raise RuntimeError(f"교보 API 응답 이상 (HTTP {status}): {text[:150]}")
         period = data.get("ymw") or period
         rows.extend(data.get("bestSeller") or [])
         time.sleep(LIST_PAUSE)
