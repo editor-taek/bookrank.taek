@@ -5,14 +5,14 @@
    "weekly": {
     "status": "failed",
     "source_url": "https://store.kyobobook.co.kr/bestseller/total/weekly",
-    "collected_at": "2026-11-25 09:05",
+    "collected_at": "2026-11-25 10:20",
     "items": [],
     "error": "KeyError: 'data'"
    },
    "daily": {
     "status": "failed",
     "source_url": "https://store.kyobobook.co.kr/bestseller/online/daily?page=1",
-    "collected_at": "2026-11-25 09:09",
+    "collected_at": "2026-11-25 10:24",
     "items": [],
     "error": "KeyError: 'data'"
    }
@@ -8266,5 +8266,5 @@
    }
   }
  },
- "collected_at": "2026-11-25 09:15"
+ "collected_at": "2026-11-25 10:29"
 }
